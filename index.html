@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>講義音声ノートAI (Gemini 3版)</title>
+    <style>
+        :root { --primary-color: #2F9444; --bg-color: #F3F4F6; --card-bg: #FFFFFF; --text-main: #1F2937; --border-color: #E5E7EB; }
+        body { font-family: sans-serif; background-color: var(--bg-color); color: var(--text-main); padding: 20px; line-height: 1.6; }
+        .container { max-width: 600px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+        .card { background: var(--card-bg); border-radius: 12px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: var(--primary-color); font-size: 1.5rem; }
+        input, button { width: 100%; padding: 12px; margin-top: 8px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 1rem; }
+        button { background: var(--primary-color); color: white; font-weight: bold; cursor: pointer; border: none; margin-top: 15px; }
+        button:disabled { background: #9CA3AF; }
+        .result-content { background: #F9FAFB; border: 1px solid var(--border-color); padding: 15px; border-radius: 8px; white-space: pre-wrap; margin-top: 10px; min-height: 100px; }
+        .loading { display: none; text-align: center; margin: 20px 0; }
+        .spinner { width: 30px; height: 30px; border: 4px solid #ddd; border-top: 4px solid var(--primary-color); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ 講義音声ノートAI</h1>
+        
+        <div class="card">
+            <label>Gemini API Key</label>
+            <input type="password" id="api-key" placeholder="AIza...">
+            <button onclick="saveKey()">キーを保存</button>
+        </div>
+
+        <div class="card">
+            <label>講義名</label>
+            <input type="text" id="lecture-name" placeholder="例: 経済学第1回">
+            <label>音声ファイル (30秒〜1分推奨)</label>
+            <input type="file" id="audio-file" accept="audio/*">
+            <button id="analyze-btn" onclick="startAnalysis()">解析スタート ▶</button>
+        </div>
+
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <p>Geminiが音声を解析中...</p>
+        </div>
+
+        <div class="card" id="result-area" style="display:none;">
+            <h3>AI要約と要点</h3>
+            <div id="summary-3lines" class="result-content" style="background: #eefdf0; border-color: #2F9444;"></div>
+            
+            <h3>文字起こし全文</h3>
+            <div id="transcript-text" class="result-content"></div>
+            
+            <button onclick="copyText()">すべてをコピー</button>
+        </div>
+    </div>
+
+    <script>
+        const GEMINI_MODEL = "gemini-3-flash-preview"; 
+
+        window.onload = () => {
+            document.getElementById('api-key').value = localStorage.getItem('gemini_api_key') || '';
+        };
+
+        function saveKey() {
+            const key = document.getElementById('api-key').value.trim();
+            if (key) {
+                localStorage.setItem('gemini_api_key', key);
+                alert('APIキーを保存しました！');
+            }
+        }
+
+        async function startAnalysis() {
+            const key = localStorage.getItem('gemini_api_key');
+            const file = document.getElementById('audio-file').files[0];
+            const lectureName = document.getElementById('lecture-name').value || "講義";
+
+            if (!key || !file) return alert('キーとファイルを確認してください');
+
+            const btn = document.getElementById('analyze-btn');
+            const loading = document.getElementById('loading');
+            const resultArea = document.getElementById('result-area');
+            
+            btn.disabled = true;
+            loading.style.display = 'block';
+            resultArea.style.display = 'none';
+
+            try {
+                const base64Data = await fileToBase64(file);
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`;
+
+                // 1. 文字起こしリクエスト
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [
+                                { inline_data: { mime_type: file.type, data: base64Data } },
+                                { text: "この音声を文字起こししてください。もし内容がない場合は『内容がありません』と回答してください。" }
+                            ]
+                        }]
+                    })
+                });
+
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error?.message || '通信エラー');
+                const transcript = data.candidates[0].content.parts[0].text;
+                document.getElementById('transcript-text').innerText = transcript;
+
+                // 2. 要約リクエスト
+                const summaryPrompt = `${lectureName}の講義録です。3行で要約し、その後に要点を3つの箇条書きでまとめてください。\n\n${transcript}`;
+                const sResponse = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: [{ parts: [{ text: summaryPrompt }] }] })
+                });
+                const sData = await sResponse.json();
+                const summaryText = sData.candidates[0].content.parts[0].text;
+
+                document.getElementById('summary-3lines').innerText = summaryText;
+                resultArea.style.display = 'block';
+
+            } catch (err) {
+                alert('エラー: ' + err.message);
+            } finally {
+                btn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = error => reject(error);
+            });
+        }
+
+        function copyText() {
+            const transcript = document.getElementById('transcript-text').innerText;
+            const summary = document.getElementById('summary-3lines').innerText;
+            navigator.clipboard.writeText(`【要約・要点】\n${summary}\n\n【全文】\n${transcript}`);
+            alert('すべてコピーしました！');
+        }
+    </script>
+</body>
+</html>
